@@ -1,7 +1,7 @@
 use std::io;
 use std::{fs, path::PathBuf, str::FromStr};
 
-use advmac::MacAddr6;
+use btleplug::api::BDAddr;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use log::{trace, warn};
 use rusttype::{Font, Scale};
@@ -62,7 +62,7 @@ pub fn generate_image(
         D30Scale::Auto { minus } => {
             // let scale = 100.0;
             let actual_size: Dimensions =
-                imageproc::drawing::text_size(Scale::uniform(100.0), &font, &text).into();
+                imageproc::drawing::text_size(Scale::uniform(100.0), &font, text).into();
             let scale_by_x = (label_dimensions.x - 2.0 * margins) / actual_size.x;
             let scale_by_y = (label_dimensions.y - 2.0 * margins) / actual_size.y;
             100.0
@@ -76,7 +76,7 @@ pub fn generate_image(
         D30Scale::Value(font_scale) => font_scale,
     };
     let actual_size: Dimensions =
-        imageproc::drawing::text_size(Scale::uniform(scale), &font, &text).into();
+        imageproc::drawing::text_size(Scale::uniform(scale), &font, text).into();
     let txt_pos = (actual_size - label_dimensions) / -2.;
 
     let mut canvas: ImageBuffer<Rgb<u8>, _> = ImageBuffer::new(
@@ -143,7 +143,7 @@ pub fn pack_image(image: &DynamicImage) -> Vec<u8> {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct D30Config {
     pub default_device: Option<String>,
-    pub resolution: IndexMap<String, MacAddr6>,
+    pub resolution: IndexMap<String, BDAddr>,
 }
 
 #[derive(Debug, Snafu)]
@@ -173,7 +173,7 @@ pub enum D30Error {
 impl D30Config {
     pub fn load_toml(path: &PathBuf) -> Result<Self, D30Error> {
         let contents = fs::read_to_string(path).context(CouldNotReadFileSnafu)?;
-        Ok(toml::from_str(contents.as_str()).context(CouldNotParseSnafu)?)
+        toml::from_str(contents.as_str()).context(CouldNotParseSnafu)
     }
 
     pub fn read_d30_config() -> Result<Self, D30Error> {
@@ -189,9 +189,13 @@ impl D30Config {
         toml
     }
 
-    pub fn resolve_addr(&self, printer_addr: &String) -> Result<MacAddr6, D30Error> {
-        match printer_addr.parse::<MacAddr6>() {
-            Ok(mac_addr) => Ok(mac_addr),
+    pub fn resolve_addr(&self, printer_addr: &String) -> Result<Option<BDAddr>, D30Error> {
+        if printer_addr.is_empty() {
+            return Ok(None);
+        }
+
+        match BDAddr::from_str_delim(printer_addr) {
+            Ok(mac_addr) => Ok(Some(mac_addr)),
 
             Err(e) => {
                 trace!("Device specification `{}` is not a MAC Address. Assuming it's a hostname, and attempting resolution.", printer_addr);
@@ -201,12 +205,12 @@ impl D30Config {
                         device: printer_addr,
                     },
                 )?;
-                Ok(*mac)
+                Ok(Some(*mac))
             }
         }
     }
 
-    pub fn resolve_default(&self) -> Result<MacAddr6, D30Error> {
+    pub fn resolve_default(&self) -> Result<Option<BDAddr>, D30Error> {
         self.resolve_addr(self.default_device.as_ref().context(NoDefaultDeviceSnafu)?)
     }
 }

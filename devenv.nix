@@ -5,14 +5,15 @@
   env.GREET = "devenv";
 
   # https://devenv.sh/packages/
-  packages = [ pkgs.git ];
+  packages = with pkgs; [ git
+                        cmake];
 
   # https://devenv.sh/languages/
   languages.rust = {
     enable = true;
-    channel = "stable";
+    channel = "nightly";
     components = [ "rustc" "cargo" "clippy" "rustfmt" "rust-analyzer" "rust-src"];
-    targets = ["thumbv7em-none-eabi"];
+    targets = ["aarch64-unknown-linux-gnu"];
   };
 
   # https://devenv.sh/processes/

@@ -3,15 +3,18 @@
 // TODO: Implement templates with fixed font sizes and positions
 // TODO: Implement 'arbitrary image' feature
 
+
 use std::{
     fs,
+    thread, time,
     io::{self, Cursor, Write},
     path::PathBuf,
     process::{exit, Command, Stdio},
 };
 
-use advmac::{MacAddr6, ParseError};
-use bluetooth_serial_port_async::{BtAddr, BtError, BtSocket};
+
+use btleplug::api::{BDAddr, ParseBDAddrError, Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use clap::{Parser, Subcommand};
 use d30::D30Scale;
 use image::{DynamicImage, ImageError, ImageFormat};
@@ -57,7 +60,7 @@ struct ArgsPrintText {
     #[arg(default_value = "1")]
     number_of_images: i32,
     #[arg(long)]
-    #[arg(default_value = "10")]
+    #[arg(default_value = "1")]
     max_retries: usize,
     /// Retry wait in seconds
     #[arg(long)]
@@ -86,10 +89,6 @@ struct Config {
     d30_config: Option<d30::D30Config>,
 }
 
-// #[derive(Debug, Snafu)]
-// pub enum ReadD30CliConfigError {
-// }
-
 impl Config {
     fn load_config() -> Result<Self, CLIError> {
         let phomemo_lib_path = xdg::BaseDirectories::with_prefix("phomemo-library")
@@ -98,7 +97,7 @@ impl Config {
             .place_config_file("phomemo-cli-config.toml")
             .context(CouldNotPlaceConfigFileSnafu)?;
         let contents = fs::read_to_string(config_path).context(CouldNotReadFileSnafu)?;
-        Ok(toml::from_str(contents.as_str()).context(CouldNotParseTOMLSnafu)?)
+        toml::from_str(contents.as_str()).context(CouldNotParseTOMLSnafu)
     }
 }
 
@@ -143,14 +142,14 @@ fn backend_show_image(preview_image: DynamicImage) -> Result<Accepted, CLIError>
 
     let possible_child_targets: Vec<PathBuf> = vec![
         std::env::current_exe()
-            .context(IOSnafu {
-                task: "find current exe",
-            })?
-            .parent()
-            .context(ParentDirectoryMissingSnafu {
-                task: "find parent of current exe",
-            })?
-            .join("d30-cli-preview"),
+        .context(IOSnafu {
+            task: "find current exe",
+        })?
+        .parent()
+        .context(ParentDirectoryMissingSnafu {
+            task: "find parent of current exe",
+        })?
+        .join("d30-cli-preview"),
         "d30-cli-preview".into(),
     ];
     for target in possible_child_targets {
@@ -247,7 +246,7 @@ fn cmd_show_preview(
     })
 }
 
-fn get_addr(config: &mut Config, user_maybe_addr: Option<String>) -> Result<MacAddr6, CLIError> {
+fn get_addr(config: &mut Config, user_maybe_addr: Option<String>) -> Result<Option<BDAddr>, CLIError> {
     match (user_maybe_addr, d30::D30Config::read_d30_config()) {
         // The case that the user has specified an address, and we have a config loaded
         // We must use config to attempt to resolve the address
@@ -263,28 +262,18 @@ fn get_addr(config: &mut Config, user_maybe_addr: Option<String>) -> Result<MacA
         // We must hope that the user gave us a fully quallified address & not a hostname
         (Some(user_specified_addr), Err(_)) => {
             info!("Address specified by user. NO config. This will fail if address is not fully qualified.");
-            Ok(user_specified_addr
-                .parse::<MacAddr6>()
-                .context(CouldNotParseMacAddrSnafu {
-                    address: user_specified_addr.clone(),
-                })?)
+            Ok(Some(BDAddr::from_str_delim(&user_specified_addr)
+                .context(CouldNotParseMacAddrSnafu { address: user_specified_addr })?))
         }
         // No address on CLI, but there IS a config!
         // Try to resolve from config
         (Option::None, Ok(config)) => {
             info!("No address on CLI, but we have a config. Will attempt to identify default target from config.");
-            match config.resolve_default() {
-                Ok(addr) => Ok(addr),
-                Err(e) => {
-                    error!("No address specified on command line or config.\nNo way to know what device we are targeting. This is a critical failure.");
-                    Err(e).context(D30LibSnafu)
-                }
-            }
+            config.resolve_default().context(CouldNotParseOrLookupMacAddressSnafu { })
         }
 
         (Option::None, Err(_)) => {
-            error!("No address specified on command line or config. No way to know what device we are targeting. This is a critical failure.");
-            todo!()
+            Ok(None)
         }
     }
 }
@@ -297,7 +286,7 @@ enum CLIError {
     FailedToPromptUser { source: InquireError },
 
     #[snafu(display("Error while attempting task `{task}` in bluetooth backend: {source}"))]
-    BluetoothBackend { source: BtError, task: String },
+    BluetoothBackend { source: btleplug::Error, task: String },
 
     #[snafu(display("IO error while attempting to execute task: {task}"))]
     IOError {
@@ -317,8 +306,11 @@ enum CLIError {
     #[snafu(display("Failed to serialize TOML D30 config"))]
     CouldNotParseTOML { source: toml::de::Error },
 
-    #[snafu(display("Could not parse MAC address: {address}"))]
-    CouldNotParseMacAddr { source: ParseError, address: String },
+    #[snafu(display("Could not parse MAC address"))]
+    CouldNotParseMacAddr { source: ParseBDAddrError, address: String },
+
+    #[snafu(display("Could not parse specified device as MAC address:\n"))]
+    CouldNotParseOrLookupMacAddress{source: d30::D30Error},
 
     #[snafu(display("Failed to call external binary `{binary_name}`. Check program environment"))]
     CouldNotCallBinary {
@@ -331,14 +323,20 @@ enum CLIError {
 
     #[snafu(display("Parent directory missing while performing task: {task}"))]
     ParentDirectoryMissing { task: String },
+
+    #[snafu(display("Could not connect to D30."))]
+    D30Connection{source: btleplug::Error, task: String },
+
+    #[snafu(display("Could not write data to D30."))]
+    D30Write{source: btleplug::Error },
 }
 
-fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIError> {
+async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIError> {
     trace!("Call: cmd_print");
     let mut args = args.to_owned();
     let dry_run = config.dry_run.unwrap_or(false) || args.dry_run;
     let show_preview = config.enable_preview.unwrap_or(false) || args.preview;
-    let addr = get_addr(config, args.device.clone())?;
+    
     debug!(
         "Generating image {} with scale {:?}",
         &args.text, &args.scale
@@ -373,10 +371,29 @@ fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIError> 
         }
     }
 
-    let mut socket: Option<BtSocket> = None;
-    println!("Connecting...");
+    let manager = Manager::new().await.context(BluetoothBackendSnafu{
+        task: "Create new btleplug Manager.",
+    })?;
+
+    println!("Search bluetooth adapters...");
+    let adapter_list = manager.adapters().await.context(BluetoothBackendSnafu{
+        task: "Search bluetooth adapter.",
+    })?;
+
+    let adapter: Adapter = adapter_list.into_iter().next().unwrap();
+
+    // start scanning for devices
+    println!("Scanning bluetooth devices...");
+    adapter.start_scan(ScanFilter::default()).await.context(BluetoothBackendSnafu{
+        task: "Search bluetooth devices.",
+    })?;
+
+    let addr = get_addr(config, args.device.clone())?;
+    let mut d30:  Option<Peripheral>  = None;
     'retry: for retries in 0.. {
         info!("Retry #{}", retries);
+        let duration = time::Duration::from_millis((args.retry_wait * 1000.0) as u64); 
+        thread::sleep(duration);
         if retries > args.max_retries {
             error!("Failed to connect after {} retries!", args.max_retries);
             exit(1);
@@ -385,46 +402,28 @@ fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIError> 
             break 'retry;
         }
 
-        let mut new_socket = match BtSocket::new(bluetooth_serial_port_async::BtProtocol::RFCOMM)
-            .context(BluetoothBackendSnafu {
-                task: "opening socket".to_string(),
-            }) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "Error while trying to open socket, on attempt #{}:\n{}",
-                    retries, e
-                );
-                continue 'retry;
-            }
-        };
-
-        if let Err(e) = new_socket.connect(BtAddr(addr.to_array())) {
-            error!(
-                "Error while trying to connect, on attempt #{}:\n{}",
-                retries, e
-            );
-            continue 'retry;
+        d30 = find_d30(&adapter, addr).await;
+        if d30.is_some(){
+            break
         }
-
-        socket = Some(new_socket);
-        break 'retry;
     }
 
-    debug!("Init connection");
-    if let Some(socket) = &mut socket {
-        socket
-            .write(d30::INIT_BASE_FLAT)
-            .map(|x| x)
-            .context(IOSnafu {
-                task: "send magic init bytes".to_string(),
-            })?;
+    let mut characterics: Option<Characteristic> = None;
+    if let Some(d30) = &mut d30 {
+        d30.connect().await.context(D30ConnectionSnafu { task: "Connect to D30 Device."})?;
+
+        characterics = d30.characteristics()
+            .into_iter()
+            .find( |chr| chr.properties ==  CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE)
+            .take();
+
+        debug!("Selected D30 characterics: {:?}", characterics)
     }
-    debug!("Extend output");
 
     // Image must be send in chunks of 255 lines
     let chunks = image.height() / 255;
-    for image_num in 0..args.number_of_images {
+
+    for _ in 0..args.number_of_images {
         let mut output = d30::IMG_PRECURSOR.to_vec();
 
         for chunk_num in 0..=chunks {
@@ -432,21 +431,47 @@ fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIError> 
             debug!("Extend output");
             output.extend(d30::pack_image(&chunk));
             debug!("Write output to socket");
-            if let Some(socket) = &mut socket {
-                socket.write(output.as_slice()).context(IOSnafu {
-                    task: format!("write image #{}", image_num),
-                })?;
+            if let Some(d30) = &mut d30 {
+                d30.write(characterics.as_ref().unwrap(), output.as_slice(), WriteType::WithResponse).await.context(D30WriteSnafu{})?
             }
-            debug!("Flush socket");
-            if let Some(socket) = &mut socket {
-                socket.flush().context(IOSnafu {
-                    task: "flush socket".to_string(),
-                })?;
-            }
+
             output.clear();
         }
     }
     Ok(())
+}
+
+async fn find_d30(central: &Adapter, addr: Option<BDAddr>) -> Option<Peripheral> {
+    for p in central.peripherals().await.unwrap() {
+        let properties_res = p.properties().await;
+
+        if let Err(e) = properties_res{
+            warn!("Error occured during get bluetooth device properties: {}", e);
+            continue
+        }
+
+        let properties = properties_res.unwrap();
+        if properties.is_none(){
+            continue
+        }
+
+        let properties = properties.unwrap();
+
+        // If execution reaches here, result is Ok, and you can unwrap or expect the value
+        let local_name = properties.local_name.unwrap_or_default();
+        debug!("Found ble device: {}, {:?}", local_name, properties.address);
+
+        if let Some(addr) =  addr {
+            if properties.address  == addr{
+                return Some(p);
+            }
+        }else if local_name == "D30"
+        {
+            return Some(p);
+        }
+    }
+
+    None
 }
 
 #[snafu::report]
@@ -477,7 +502,7 @@ async fn main() -> Result<(), CLIError> {
 
     match &args.command {
         Commands::PrintText(args) => {
-            cmd_print(&mut config, &args)?;
+            cmd_print(&mut config, args).await?;
         }
     }
 

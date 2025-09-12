@@ -13,7 +13,7 @@ package.repository = "https://github.com/crabdancing/phomemo-d30"
 # IMPORTANT: always bump these when bumping package version
 d30 = "0.2.3"
 
-bluetooth-serial-port-async = "0.6.3"
+btleplug = {version  ="0.11.8", features=["serde"]}
 derive_more = "0.99.17"
 dimensions = "0.1.0"
 image = { version = "0.24.6", features = ["jpeg", "dds"] }
@@ -25,7 +25,6 @@ clap = { version = "4.3.19", features = ["derive"] }
 env_logger = "0.11.1"
 log = "0.4.19"
 hex = "0.4.3"
-advmac = "1.0.3"
 inquire = "0.6.2"
 serde = { version = "1.0.178", features = ["derive", "rc"] }
 xdg = "2.5.2"
