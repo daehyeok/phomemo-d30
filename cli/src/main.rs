@@ -64,7 +64,7 @@ struct ArgsPrintText {
     max_retries: usize,
     /// Retry wait in seconds
     #[arg(long)]
-    #[arg(default_value = "1")]
+    #[arg(default_value = "2")]
     retry_wait: f32,
 }
 
@@ -392,8 +392,11 @@ async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIE
     let mut d30:  Option<Peripheral>  = None;
     'retry: for retries in 0.. {
         info!("Retry #{}", retries);
-        let duration = time::Duration::from_millis((args.retry_wait * 1000.0) as u64); 
+
+        let duration = time::Duration::from_secs_f32(args.retry_wait);
+        info!("Wait #{} seconds", duration.as_secs_f32());
         thread::sleep(duration);
+
         if retries > args.max_retries {
             error!("Failed to connect after {} retries!", args.max_retries);
             exit(1);
@@ -412,10 +415,18 @@ async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIE
     if let Some(d30) = &mut d30 {
         d30.connect().await.context(D30ConnectionSnafu { task: "Connect to D30 Device."})?;
 
+        for chr in d30.characteristics(){
+            debug!("D30 characterics: {:?}", chr);
+        }
+
         characterics = d30.characteristics()
             .into_iter()
             .find( |chr| chr.properties ==  CharPropFlags::WRITE | CharPropFlags::WRITE_WITHOUT_RESPONSE)
             .take();
+        
+        if characterics.is_none(){
+            error!("Failed to find D30 bluetooth characterics.");
+        }
 
         debug!("Selected D30 characterics: {:?}", characterics)
     }
@@ -442,6 +453,7 @@ async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIE
 }
 
 async fn find_d30(central: &Adapter, addr: Option<BDAddr>) -> Option<Peripheral> {
+    debug!("String scanning d30");
     for p in central.peripherals().await.unwrap() {
         let properties_res = p.properties().await;
 
