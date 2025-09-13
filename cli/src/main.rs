@@ -398,7 +398,7 @@ async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIE
         thread::sleep(duration);
 
         if retries > args.max_retries {
-            error!("Failed to connect after {} retries!", args.max_retries);
+            error!("Failed to find D30 after {} retries!", args.max_retries);
             exit(1);
         }
         if dry_run {
@@ -413,7 +413,11 @@ async fn cmd_print(config: &mut Config, args: &ArgsPrintText) -> Result<(), CLIE
 
     let mut characterics: Option<Characteristic> = None;
     if let Some(d30) = &mut d30 {
-        d30.connect().await.context(D30ConnectionSnafu { task: "Connect to D30 Device."})?;
+        
+        if let Err(e) = d30.connect().await.context(D30ConnectionSnafu { task: "Connect to D30 Device."}){
+            error!("Failed to connect D30!, {}", e);
+            exit(1);
+        }
 
         for chr in d30.characteristics(){
             debug!("D30 characterics: {:?}", chr);
@@ -457,6 +461,7 @@ async fn find_d30(central: &Adapter, addr: Option<BDAddr>) -> Option<Peripheral>
     for p in central.peripherals().await.unwrap() {
         let properties_res = p.properties().await;
 
+        
         if let Err(e) = properties_res{
             warn!("Error occured during get bluetooth device properties: {}", e);
             continue
@@ -466,6 +471,8 @@ async fn find_d30(central: &Adapter, addr: Option<BDAddr>) -> Option<Peripheral>
         if properties.is_none(){
             continue
         }
+
+        debug!("{:?}",properties );
 
         let properties = properties.unwrap();
 
